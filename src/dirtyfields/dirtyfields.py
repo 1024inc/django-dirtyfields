@@ -154,7 +154,10 @@ def reset_state(sender, instance, **kwargs):
                 if field.get_attname() in instance.get_deferred_fields():
                     continue
 
-                instance._original_state[field.name] = new_state[field.name]
+                # Use the column name (instead of the relationship name) if it's a
+                # foreign key.
+                key = field.attname if hasattr(field, 'attname') else field.name
+                instance._original_state[key] = new_state[key]
 
     else:
         instance._original_state = new_state
