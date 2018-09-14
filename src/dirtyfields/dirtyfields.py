@@ -2,12 +2,101 @@
 from copy import deepcopy
 
 from django.core.exceptions import ValidationError
+from django.db import models
+from django.db.models import DEFERRED
+from django.db.models.query import ModelIterable, get_related_populators
 from django.db.models.expressions import BaseExpression
 from django.db.models.expressions import Combinable
 from django.db.models.signals import post_save, m2m_changed
 
 from .compare import raw_compare, compare_states, normalise_value
 from .compat import is_buffer, get_m2m_with_model, remote_field
+from .decorators import require_non_disabled
+
+
+# NOTE: Overridden to pass the flag to disable dirtyfields from the queryset to the model creation
+# Additions are surrounded by ### comment blocks
+class _ModelIterable(ModelIterable):
+
+    def __iter__(self):
+        queryset = self.queryset
+
+        ###
+        # Get disable_dirtyfields from the queryset
+        disable_dirtyfields = queryset._disable_dirtyfields
+        ###
+
+        db = queryset.db
+        compiler = queryset.query.get_compiler(using=db)
+        # Execute the query. This will also fill compiler.select, klass_info,
+        # and annotations.
+        results = compiler.execute_sql(chunked_fetch=self.chunked_fetch)
+        select, klass_info, annotation_col_map = (compiler.select, compiler.klass_info,
+                                                  compiler.annotation_col_map)
+        model_cls = klass_info['model']
+        select_fields = klass_info['select_fields']
+        model_fields_start, model_fields_end = select_fields[0], select_fields[-1] + 1
+        init_list = [f[0].target.attname
+                     for f in select[model_fields_start:model_fields_end]]
+        related_populators = get_related_populators(klass_info, select, db)
+        for row in compiler.results_iter(results):
+            obj = model_cls.from_db(
+                db, init_list, row[model_fields_start:model_fields_end],
+                ###
+                # Pass disable_dirtyfields
+                disable_dirtyfields=disable_dirtyfields
+                ###
+            )
+            if related_populators:
+                for rel_populator in related_populators:
+                    rel_populator.populate(row, obj)
+            if annotation_col_map:
+                for attr_name, col_pos in annotation_col_map.items():
+                    setattr(obj, attr_name, row[col_pos])
+
+            # Add the known related objects to the model, if there are any
+            if queryset._known_related_objects:
+                for field, rel_objs in queryset._known_related_objects.items():
+                    # Avoid overwriting objects loaded e.g. by select_related
+                    if hasattr(obj, field.get_cache_name()):
+                        continue
+                    pk = getattr(obj, field.get_attname())
+                    try:
+                        rel_obj = rel_objs[pk]
+                    except KeyError:
+                        pass  # may happen in qs1 | qs2 scenarios
+                    else:
+                        setattr(obj, field.name, rel_obj)
+
+            yield obj
+
+
+class DirtyFieldsQuerySet(models.QuerySet):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Replace with our ModelIterable
+        self._iterable_class = _ModelIterable
+
+        # Flag to know whether dirtyfields needs to be disabled or not
+        # Not disabled by default
+        self._disable_dirtyfields = False
+
+    def disable_dirtyfields(self):
+        """Returns a new queryset with dirtyfields disabled"""
+        clone = self._clone()
+        # Set to True
+        clone._disable_dirtyfields = True
+        return clone
+
+    # NOTE: Overridden to pass disable_dirtyfields to the clone
+    def _clone(self, **kwargs):
+        clone = super()._clone(**kwargs)
+
+        # Pass disable_dirtyfields to the cloned queryset
+        clone._disable_dirtyfields = self._disable_dirtyfields
+
+        return clone
 
 
 class DirtyFieldsMixin(object):
@@ -21,19 +110,48 @@ class DirtyFieldsMixin(object):
     FIELDS_TO_CHECK = None
 
     def __init__(self, *args, **kwargs):
+
+        # Get the flag to know whether to disable dirtyfields
+        self._dirtyfields_disabled = kwargs.pop('disable_dirtyfields', False)
+
         super(DirtyFieldsMixin, self).__init__(*args, **kwargs)
-        post_save.connect(
-            reset_state, sender=self.__class__, weak=False,
-            dispatch_uid='{name}-DirtyFieldsMixin-sweeper'.format(
-                name=self.__class__.__name__))
-        if self.ENABLE_M2M_CHECK:
-            self._connect_m2m_relations()
-        reset_state(sender=self.__class__, instance=self)
+
+        # Init state only if not disabled
+        if not self._dirtyfields_disabled:
+            post_save.connect(
+                reset_state, sender=self.__class__, weak=False,
+                dispatch_uid='{name}-DirtyFieldsMixin-sweeper'.format(
+                    name=self.__class__.__name__))
+            if self.ENABLE_M2M_CHECK:
+                self._connect_m2m_relations()
+            reset_state(sender=self.__class__, instance=self)
+
+    # NOTE: Overridden to pass disable_dirtyfields
+    # Additions are surrounded by ### comment blocks
+    @classmethod
+    def from_db(cls, db, field_names, values, disable_dirtyfields=None):
+        if len(values) != len(cls._meta.concrete_fields):
+            values = list(values)
+            values.reverse()
+            values = [values.pop() if f.attname in field_names else DEFERRED for f in cls._meta.concrete_fields]
+
+        ###
+        # Pass disable_dirtyfields to the model
+        new = cls(*values, disable_dirtyfields=disable_dirtyfields)
+        ###
+
+        new._state.adding = False
+        new._state.db = db
+        return new
 
     def refresh_from_db(self, *a, **kw):
         super(DirtyFieldsMixin, self).refresh_from_db(*a, **kw)
-        reset_state(sender=self.__class__, instance=self)
 
+        # Reset state only if not disabled
+        if not self._dirtyfields_disabled:
+            reset_state(sender=self.__class__, instance=self)
+
+    @require_non_disabled
     def _connect_m2m_relations(self):
         for m2m_field, model in get_m2m_with_model(self.__class__):
             m2m_changed.connect(
@@ -41,6 +159,7 @@ class DirtyFieldsMixin(object):
                 dispatch_uid='{name}-DirtyFieldsMixin-sweeper-m2m'.format(
                     name=self.__class__.__name__))
 
+    @require_non_disabled
     def _as_dict(self, check_relationship, include_primary_key=True):
         all_field = {}
 
@@ -86,6 +205,7 @@ class DirtyFieldsMixin(object):
 
         return all_field
 
+    @require_non_disabled
     def _as_dict_m2m(self):
         m2m_fields = {}
 
@@ -98,6 +218,7 @@ class DirtyFieldsMixin(object):
 
         return m2m_fields
 
+    @require_non_disabled
     def get_dirty_fields(self, check_relationship=False, check_m2m=None, verbose=False):
         if self._state.adding:
             # If the object has not yet been saved in the database, all fields are considered dirty
@@ -130,10 +251,12 @@ class DirtyFieldsMixin(object):
 
         return modified_fields
 
+    @require_non_disabled
     def is_dirty(self, check_relationship=False, check_m2m=None):
         return {} != self.get_dirty_fields(check_relationship=check_relationship,
                                            check_m2m=check_m2m)
 
+    @require_non_disabled
     def save_dirty_fields(self):
         dirty_fields = self.get_dirty_fields(check_relationship=True)
         self.save(update_fields=dirty_fields.keys())
