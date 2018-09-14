@@ -1,5 +1,6 @@
 # Adapted from http://stackoverflow.com/questions/110803/dirty-fields-in-django
 from copy import deepcopy
+import logging
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -12,6 +13,9 @@ from django.db.models.signals import post_save, m2m_changed
 from .compare import raw_compare, compare_states, normalise_value
 from .compat import is_buffer, get_m2m_with_model, remote_field
 from .decorators import require_non_disabled
+
+
+log = logging.getLogger(__name__)
 
 
 # NOTE: Overridden to pass the flag to disable dirtyfields for the select related objects
@@ -32,13 +36,24 @@ class _RelatedPopulator(RelatedPopulator):
         if obj_data[self.pk_idx] is None:
             obj = None
         else:
-            obj = self.model_cls.from_db(
-                self.db, self.init_list, obj_data,
-                ###
-                # Pass disable_dirtyfields
-                disable_dirtyfields=dirtyfields_disabled
-                ###
-            )
+            ###
+            # Pass disable_dirtyfield only if it's a subclass of DirtyFieldsMixin
+            # because only a subclass of DirtyFieldsMixin will support this kwarg
+            if issubclass(self.model_cls, DirtyFieldsMixin):
+                obj = self.model_cls.from_db(
+                    self.db, self.init_list, obj_data,
+                    disable_dirtyfields=dirtyfields_disabled
+                )
+            else:
+                if dirtyfields_disabled:
+                    log.warning(
+                        f'Dirtyfields is disabled but this model does not '
+                        f'support it: {self.model_cls} '
+                        f'=> Inherit from DirtyFieldsMixin to support it'
+                    )
+                obj = self.model_cls.from_db(self.db, self.init_list, obj_data)
+            ###
+
         if obj and self.related_populators:
             for rel_iter in self.related_populators:
                 rel_iter.populate(row, obj)
@@ -86,13 +101,28 @@ class _ModelIterable(ModelIterable):
                      for f in select[model_fields_start:model_fields_end]]
         related_populators = get_related_populators(klass_info, select, db)
         for row in compiler.results_iter(results):
-            obj = model_cls.from_db(
-                db, init_list, row[model_fields_start:model_fields_end],
-                ###
-                # Pass disable_dirtyfields
-                disable_dirtyfields=disable_dirtyfields
-                ###
-            )
+
+            ###
+            # Pass disable_dirtyfield only if it's a subclass of DirtyFieldsMixin
+            # because only a subclass of DirtyFieldsMixin will support this kwarg
+            if issubclass(model_cls, DirtyFieldsMixin):
+                obj = model_cls.from_db(
+                    db, init_list, row[model_fields_start:model_fields_end],
+                    ###
+                    # Pass disable_dirtyfields
+                    disable_dirtyfields=disable_dirtyfields
+                    ###
+                )
+            else:
+                if dirtyfields_disabled:
+                    log.warning(
+                        f'Dirtyfields is disabled but this model does not '
+                        f'support it: {model_cls} '
+                        f'=> Inherit from DirtyFieldsMixin to support it'
+                    )
+                obj = model_cls.from_db(db, init_list, row[model_fields_start:model_fields_end])
+            ###
+
             if related_populators:
                 for rel_populator in related_populators:
                     rel_populator.populate(row, obj)
