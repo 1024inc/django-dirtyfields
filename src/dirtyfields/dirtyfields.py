@@ -4,7 +4,7 @@ from copy import deepcopy
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import DEFERRED
-from django.db.models.query import ModelIterable, get_related_populators
+from django.db.models.query import ModelIterable, RelatedPopulator
 from django.db.models.expressions import BaseExpression
 from django.db.models.expressions import Combinable
 from django.db.models.signals import post_save, m2m_changed
@@ -12,6 +12,52 @@ from django.db.models.signals import post_save, m2m_changed
 from .compare import raw_compare, compare_states, normalise_value
 from .compat import is_buffer, get_m2m_with_model, remote_field
 from .decorators import require_non_disabled
+
+
+# NOTE: Overridden to pass the flag to disable dirtyfields for the select related objects
+# Additions are surrounded by ### comment blocks
+class _RelatedPopulator(RelatedPopulator):
+
+    def populate(self, row, from_obj):
+
+        ###
+        # Get the flag from the object
+        dirtyfields_disabled = from_obj._dirtyfields_disabled
+        ###
+
+        if self.reorder_for_init:
+            obj_data = self.reorder_for_init(row)
+        else:
+            obj_data = row[self.cols_start:self.cols_end]
+        if obj_data[self.pk_idx] is None:
+            obj = None
+        else:
+            obj = self.model_cls.from_db(
+                self.db, self.init_list, obj_data,
+                ###
+                # Pass disable_dirtyfields
+                disable_dirtyfields=dirtyfields_disabled
+                ###
+            )
+        if obj and self.related_populators:
+            for rel_iter in self.related_populators:
+                rel_iter.populate(row, obj)
+        setattr(from_obj, self.cache_name, obj)
+        if obj and self.reverse_cache_name:
+            setattr(obj, self.reverse_cache_name, from_obj)
+
+
+# NOTE: Overridden to use our RelatedPopulator
+def get_related_populators(klass_info, select, db):
+    iterators = []
+    related_klass_infos = klass_info.get('related_klass_infos', [])
+    for rel_klass_info in related_klass_infos:
+        ###
+        # Use our RelatedPopulator
+        rel_cls = _RelatedPopulator(rel_klass_info, select, db)
+        ###
+        iterators.append(rel_cls)
+    return iterators
 
 
 # NOTE: Overridden to pass the flag to disable dirtyfields from the queryset to the model creation
