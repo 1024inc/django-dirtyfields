@@ -114,7 +114,7 @@ class _ModelIterable(ModelIterable):
                     ###
                 )
             else:
-                if dirtyfields_disabled:
+                if disable_dirtyfields:
                     log.warning(
                         f'Dirtyfields is disabled but this model does not '
                         f'support it: {model_cls} '
