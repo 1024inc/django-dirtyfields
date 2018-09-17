@@ -190,6 +190,8 @@ class DirtyFieldsMixin(object):
         # Get the flag to know whether to disable dirtyfields
         self._dirtyfields_disabled = kwargs.pop('disable_dirtyfields', False)
 
+        log.debug(f'__init__ {self._dirtyfields_disabled}')
+
         super(DirtyFieldsMixin, self).__init__(*args, **kwargs)
 
         # Init state only if not disabled
@@ -213,6 +215,7 @@ class DirtyFieldsMixin(object):
 
         ###
         # Pass disable_dirtyfields to the model
+        log.debug(f'from_db {disable_dirtyfields} - {cls}')
         new = cls(*values, disable_dirtyfields=disable_dirtyfields)
         ###
 
@@ -339,6 +342,7 @@ class DirtyFieldsMixin(object):
 
 
 def reset_state(sender, instance, **kwargs):
+    log.debug(f'RESET STATE: {sender} {instance}')
     # original state should hold all possible dirty fields to avoid
     # getting a `KeyError` when checking if a field is dirty or not
     update_fields = kwargs.pop('update_fields', {})
