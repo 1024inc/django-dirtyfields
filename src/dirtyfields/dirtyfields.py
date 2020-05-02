@@ -1,6 +1,6 @@
 # Adapted from http://stackoverflow.com/questions/110803/dirty-fields-in-django
-from copy import deepcopy
 import logging
+import pickle
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -154,7 +154,7 @@ class DirtyFieldsMixin(object):
             key = field.attname if hasattr(field, 'attname') else field.name
             # Explanation of copy usage here :
             # https://github.com/romgar/django-dirtyfields/commit/efd0286db8b874b5d6bd06c9e903b1a0c9cc6b00
-            all_field[key] = deepcopy(field_value)
+            all_field[key] = pickle.loads(pickle.dumps(field_value, -1))
 
         return all_field
 
