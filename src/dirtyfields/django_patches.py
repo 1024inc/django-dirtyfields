@@ -47,12 +47,13 @@ class RelatedPopulator(django.db.models.query.RelatedPopulator):
                 obj = self.model_cls.from_db(self.db, self.init_list, obj_data)
             ###
 
-        if obj and self.related_populators:
             for rel_iter in self.related_populators:
                 rel_iter.populate(row, obj)
-        setattr(from_obj, self.cache_name, obj)
-        if obj and self.reverse_cache_name:
-            setattr(obj, self.reverse_cache_name, from_obj)
+
+        self.local_setter(from_obj, obj)
+        if obj is not None:
+            self.remote_setter(obj, from_obj)
+
 
 
 # NOTE: Overridden to use our RelatedPopulator
